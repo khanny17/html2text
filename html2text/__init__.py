@@ -108,7 +108,7 @@ class HTML2Text(html.parser.HTMLParser):
         self.acount = 0
         self.list = []  # type: List[ListElement]
         self.blockquote = 0
-        self.pre = False
+        self.pre = 0
         self.startpre = False
         self.code = False
         self.quote = False
@@ -302,10 +302,33 @@ class HTML2Text(html.parser.HTMLParser):
     ) -> None:
         self.current_tag = tag
 
-        if self.tag_callback is not None:
-            if self.tag_callback(self, tag, attrs, start) is True:
-                return
+        # The attrs parameter is empty for a closing tag. We
+        # need the attributes of the parent nodes in order to get a
+        # complete style description for the current element.
+        # In order to do this, we maintain a "tag stack"
+        parent_style = {}  # type: Dict[str, str]
+        if start:
+            if self.tag_stack:
+                parent_style = self.tag_stack[-1][2]
+            tag_style = element_style(attrs, self.style_def, parent_style)
+            self.tag_stack.append((tag, attrs, tag_style))
+        else:
+            _, attrs, tag_style = (
+                self.tag_stack.pop() if self.tag_stack else (None, {}, {})
+            )
+            if self.tag_stack:
+                parent_style = self.tag_stack[-1][2]
+                
+        # Get styles defined on the open tag (or style_def overrides) - does not include any parent styles
+        own_style = element_style(attrs, self.style_def, {})
 
+        # Call the given callback if available. If the callback returns true, it means we should stop processing
+        # this tag.
+        if self.tag_callback(self, tag, attrs, start) if callable(self.tag_callback) else False:
+            return
+        
+        # --- Continue with processing the tag ---
+        
         # first thing inside the anchor tag is another tag
         # that produces some output
         if (
@@ -317,24 +340,6 @@ class HTML2Text(html.parser.HTMLParser):
             self.o("[")
             self.maybe_automatic_link = None
             self.empty_link = False
-
-        if self.google_doc:
-            # the attrs parameter is empty for a closing tag. in addition, we
-            # need the attributes of the parent nodes in order to get a
-            # complete style description for the current element. we assume
-            # that google docs export well formed html.
-            parent_style = {}  # type: Dict[str, str]
-            if start:
-                if self.tag_stack:
-                    parent_style = self.tag_stack[-1][2]
-                tag_style = element_style(attrs, self.style_def, parent_style)
-                self.tag_stack.append((tag, attrs, tag_style))
-            else:
-                dummy, attrs, tag_style = (
-                    self.tag_stack.pop() if self.tag_stack else (None, {}, {})
-                )
-                if self.tag_stack:
-                    parent_style = self.tag_stack[-1][2]
 
         if hn(tag):
             # check if nh is inside of an 'a' tag (incorrect but found in the wild)
@@ -710,15 +715,14 @@ class HTML2Text(html.parser.HTMLParser):
                 if tag in ["td", "th"] and start:
                     self.td_count += 1
 
-        if tag == "pre" or element_style(attrs, self.style_def, {}).get("white-space", "") == "pre-wrap":
+        if tag == "pre" or own_style.get("white-space", "") in {"pre", "pre-wrap", "break-spaces"}:
             if start:
-                self.startpre = True
-                self.pre = True
+                self.startpre = tag == "pre"
+                self.pre += 1
             else:
-                self.pre = False
+                self.pre -= 1
                 if self.mark_code:
                     self.out("\n[/code]")
-            self.p()
 
     # TODO: Add docstring for these one letter functions
     def pbr(self) -> None:
